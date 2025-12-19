@@ -1,3 +1,10 @@
+import streamlit as st
+import io
+
+def clean_edi_element(segment_str):
+    """Membersihkan newline/whitespace yang tidak perlu di akhir segmen"""
+    return segment_str.strip()
+
 def process_baplie_to_movins(content, target_loc="IDJKT"):
     """
     Core logic konversi:
