@@ -14,13 +14,12 @@ class BapGenerator:
         self.segments.append(f"DTM+137:{now.strftime('%Y%m%d%H%M')}:201'")
         self.segments.append(f"TDT+20+{voyage}+++:172:20+++BKLU:103::{vessel_name}'")
         self.segments.append(f"LOC+5+{pol}:139:6'")
-        self.segments.append(f"DTM+132:{now.strftime('%Y%m%d%H%M')}:201'")
         self.segments.append("HAN+LOA'")
 
     def add_slot(self, bay, row, tier, pol, pod, iso_type="2210"):
         coord = f"{int(bay):03d}{int(row):02d}{int(tier):02d}"
         self.segments.append(f"LOC+147+{coord}'")
-        self.segments.append("MEA+WT++KGM:00000'") # Default 0
+        self.segments.append("MEA+WT++KGM:00000'") 
         self.segments.append(f"LOC+9+{pol}'")
         self.segments.append(f"LOC+11+{pod}'")
         self.segments.append("RFF+BM:1'")
@@ -32,76 +31,92 @@ class BapGenerator:
         self.segments.append("UNZ+1+0'")
         return '\r\n'.join(self.segments)
 
-# --- FUNGSI PARSING PDF (SEDERHANA) ---
-def extract_pdf_symbols(uploaded_file):
-    # Logika ini perlu disesuaikan dengan posisi grid spesifik di PDF Anda
-    # Sebagai contoh, kita ambil semua karakter tunggal/pendek yang ditemukan
-    symbolsfound = []
+# --- FUNGSI PARSING PDF (BERDASARKAN HALAMAN PILIHAN) ---
+def get_pdf_info(uploaded_file):
+    """Fungsi untuk mengambil info jumlah halaman dan deteksi Bay"""
+    pages_info = []
     with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text()
+            # Mencoba mencari nomor Bay di teks (Contoh: "BAY 21")
+            bay_label = f"Halaman {i+1}"
+            if text:
+                for line in text.split('\n'):
+                    if "BAY" in line.upper():
+                        bay_label = f"{line.strip()} (Hal {i+1})"
+                        break
+            pages_info.append({"index": i, "label": bay_label})
+    return pages_info
+
+def extract_symbols_from_selected_pages(uploaded_file, selected_page_indices):
+    symbols_found = []
+    with pdfplumber.open(uploaded_file) as pdf:
+        for idx in selected_page_indices:
+            page = pdf.pages[idx]
             text = page.extract_text()
             if text:
-                # Logika simulasi: mencari karakter unik yang sering muncul (X, P, J, K, dsb)
                 for word in text.split():
-                    if len(word) <= 3 and word.isalpha():
-                        symbolsfound.append(word.upper())
-    return sorted(list(set(symbolsfound)))
+                    # Membersihkan simbol (hanya ambil yang penting)
+                    clean_word = "".join(filter(str.isalpha, word.upper()))
+                    if 0 < len(clean_word) <= 3:
+                        symbols_found.append(clean_word)
+    return sorted(list(set(symbols_found)))
 
 # --- ANTARMUKA STREAMLIT ---
-st.set_page_config(page_title="PDF to MOVINS Converter", layout="wide")
-st.title("🚢 PDF to MOVINS (.BAP) Converter")
-st.write("Upload PDF Stowage Plan untuk diconvert menjadi format EDIFACT MOVINS.")
+st.set_page_config(page_title="PDF to MOVINS", layout="wide")
+st.title("🚢 PDF to MOVINS Converter")
 
 with st.sidebar:
-    st.header("Informasi Kapal")
+    st.header("1. Informasi Kapal")
     vessel = st.text_input("Nama Kapal", "EVER BLINK")
     voyage = st.text_input("Voyage", "1170-077A")
     pol = st.text_input("Port of Loading", "IDJKT")
 
-uploaded_file = st.file_uploader("Pilih file PDF Stowage Plan", type=["pdf"])
+uploaded_file = st.file_uploader("2. Upload PDF Stowage Plan", type=["pdf"])
 
 if uploaded_file:
-    # 1. Ekstraksi Simbol
-    st.info("Menganalisis simbol di PDF...")
-    detected_symbols = extract_pdf_symbols(uploaded_file)
-    
-    st.subheader("🛠 Validasi Mapping Port")
-    st.write("Tentukan UNLOCODE (5 Huruf) untuk setiap simbol yang ditemukan di PDF.")
-    
-    # 2. Form Validasi User
-    mapping_data = {}
-    col1, col2 = st.columns(2)
-    
-    for i, symbol in enumerate(detected_symbols):
-        with col1 if i % 2 == 0 else col2:
-            mapping_data[symbol] = st.text_input(f"POD untuk Simbol '{symbol}':", 
-                                                placeholder="Contoh: MYPTP", 
-                                                key=f"sym_{symbol}")
+    # Ambil info halaman
+    pdf_pages = get_pdf_info(uploaded_file)
+    page_options = {p['label']: p['index'] for p in pdf_pages}
 
-    if st.button("Generate File BAP"):
-        # 3. Proses Pembuatan File
-        # (Dalam aplikasi nyata, koordinat bay/row/tier diambil dari posisi grid di PDF)
-        # Di bawah ini adalah simulasi data koordinat
-        gen = BapGenerator(vessel, voyage, pol)
+    st.subheader("3. Pilih Halaman/Bay")
+    selected_labels = st.multiselect(
+        "Pilih halaman yang ingin diproses menjadi MOVINS:",
+        options=list(page_options.keys()),
+        default=list(page_options.keys())[0] # Default pilih halaman pertama
+    )
+    
+    selected_indices = [page_options[lbl] for lbl in selected_labels]
+
+    if selected_indices:
+        # Analisis simbol hanya dari halaman terpilih
+        detected_symbols = extract_symbols_from_selected_pages(uploaded_file, selected_indices)
         
-        # Contoh simulasi loop data (nanti diintegrasikan dengan koordinat PDF asli)
-        # Di sini kita hanya mendemonstrasikan hasil mapping
-        dummy_data = [
-            {"bay": "01", "row": "08", "tier": "82", "sym": detected_symbols[0] if detected_symbols else "X"}
-        ]
+        st.subheader("4. Validasi Mapping Port")
+        st.info(f"Menganalisis simbol dari {len(selected_indices)} halaman terpilih...")
         
-        for item in dummy_data:
-            pod_target = mapping_data.get(item['sym'], "UNKNOWN")
-            gen.add_slot(item['bay'], item['row'], item['tier'], pol, pod_target)
-        
-        bap_content = gen.finalize()
-        
-        st.success("File Berhasil Dibuat!")
-        st.download_button(
-            label="Download .BAP File",
-            data=bap_content,
-            file_name=f"MOVINS_{vessel}_{voyage}.BAP",
-            mime="application/octet-stream"
-        )
-        
-        st.code(bap_content, language='text')
+        mapping_data = {}
+        cols = st.columns(3)
+        for i, symbol in enumerate(detected_symbols):
+            with cols[i % 3]:
+                mapping_data[symbol] = st.text_input(f"POD untuk '{symbol}':", placeholder="Contoh: MYPTP", key=f"s_{symbol}")
+
+        if st.button("Generate MOVINS (.BAP)"):
+            gen = BapGenerator(vessel, voyage, pol)
+            
+            # Simulasi ekstraksi koordinat (Ini adalah bagian yang perlu disesuaikan 
+            # lebih lanjut dengan koordinat tabel PDF Anda)
+            # Contoh dummy untuk testing:
+            gen.add_slot("01", "08", "82", pol, mapping_data.get(detected_symbols[0], "UNKNOWN") if detected_symbols else "UNKNOWN")
+            
+            bap_content = gen.finalize()
+            
+            st.success(f"Berhasil mengonversi {len(selected_indices)} halaman!")
+            st.download_button(
+                label="📥 Download File .BAP",
+                data=bap_content,
+                file_name=f"MOVINS_{vessel}_{voyage}.BAP",
+                mime="text/plain"
+            )
+    else:
+        st.warning("Silakan pilih minimal satu halaman untuk diproses.")
