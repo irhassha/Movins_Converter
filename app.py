@@ -1,6 +1,7 @@
 import streamlit as st
 import pdfplumber
 import datetime
+import re
 
 # --- FUNGSI CORE: GENERATOR BAP ---
 class BapGenerator:
@@ -30,70 +31,73 @@ class BapGenerator:
         self.segments.append("UNZ+1+0'")
         return '\r\n'.join(self.segments)
 
-# --- FUNGSI PARSING DENGAN BLACKLIST ---
-def extract_clean_symbols(uploaded_file, page_index):
-    symbols_found = []
-    # Daftar kata yang harus diabaikan (Blacklist)
-    blacklist = ["NO", "X", "PAGE", "VOY", "DATE", "POL", "BAY", "DKT", "STW", "BLNK"]
+# --- FUNGSI PARSING DENGAN WHITELIST KARAKTER ---
+def extract_cargo_codes(uploaded_file, page_index):
+    cargo_symbols = []
     
     with pdfplumber.open(uploaded_file) as pdf:
         page = pdf.pages[page_index]
         words = page.extract_words()
         
         for w in words:
-            text = w['text'].strip().upper()
+            raw_text = w['text'].strip()
             
-            # Kriteria: Huruf saja, panjang 1-3 karakter, bukan angka, bukan blacklist
-            if (len(text) <= 3 and 
-                text.isalpha() and 
-                text not in blacklist):
-                symbols_found.append(text)
+            # Kriteria Ketat (Whitelist):
+            # 1. Harus Huruf Besar semua
+            # 2. Tidak boleh ada angka
+            # 3. Panjangnya 1-3 karakter (misal: P, PP, PPP)
+            # 4. Bukan kata umum yang sering muncul di header/footer
+            if (raw_text.isupper() and 
+                raw_text.isalpha() and 
+                len(raw_text) <= 3 and
+                raw_text not in ["NO", "X", "POL", "BAY", "VOY", "DKT", "STW", "PAGE"]):
                 
-    return sorted(list(set(symbols_found)))
+                # Kita ambil karakter tunggalnya saja (misal PPP jadi P)
+                single_code = raw_text[0]
+                cargo_symbols.append(single_code)
+                
+    return sorted(list(set(cargo_symbols)))
 
 # --- UI STREAMLIT ---
-st.set_page_config(page_title="Stowage Clean Converter", layout="centered")
-st.title("🚢 BAP Generator (Clean Version)")
+st.set_page_config(page_title="Stowage to BAP v3", layout="centered")
+st.title("🚢 BAP Generator (Final Filter)")
 
 with st.sidebar:
-    st.header("Vessel Info")
+    st.header("Informasi Kapal")
     v_name = st.text_input("Vessel Name", "EVER BLINK")
     v_voy = st.text_input("Voyage", "1170-077A")
     v_pol = st.text_input("POL", "IDJKT")
 
-uploaded_file = st.file_uploader("Upload PDF Page 1", type=["pdf"])
+uploaded_file = st.file_uploader("Upload Stowage PDF (Page 1)", type=["pdf"])
 
 if uploaded_file:
-    st.info("Menganalisis kode kargo di Halaman 1...")
+    # Scan simbol
+    detected = extract_cargo_codes(uploaded_file, 0)
     
-    # Ambil simbol yang bersih
-    detected_symbols = extract_clean_symbols(uploaded_file, 0)
-    
-    if not detected_symbols:
-        st.warning("Tidak ditemukan kode kargo yang valid di halaman ini.")
+    if not detected:
+        st.warning("Tidak ditemukan kode kargo (seperti P, J, U) di halaman ini.")
     else:
-        st.subheader("📍 Validasi Kode Pelabuhan")
-        st.write("Tentukan UNLOCODE untuk simbol kargo yang ditemukan:")
+        st.subheader("📍 Validasi Tujuan (POD)")
+        st.write("Ditemukan simbol kargo di dalam Bay. Masukkan UNLOCODE tujuannya:")
         
-        mapping_dict = {}
-        # Layout kolom dinamis berdasarkan jumlah simbol
-        cols = st.columns(max(len(detected_symbols), 1))
-        for i, sym in enumerate(detected_symbols):
+        mapping = {}
+        # Tampilkan secara horizontal
+        cols = st.columns(len(detected))
+        for i, sym in enumerate(detected):
             with cols[i]:
-                mapping_dict[sym] = st.text_input(f"Simbol: {sym}", placeholder="POD", key=f"v_{sym}")
+                mapping[sym] = st.text_input(f"Simbol {sym}", placeholder="POD", key=f"v_{sym}").upper()
 
-        if st.button("Generate .BAP File"):
-            if any(v == "" for v in mapping_dict.values()):
-                st.error("Mohon isi semua POD.")
+        if st.button("Generate .BAP"):
+            if any(v == "" for v in mapping.values()):
+                st.error("Mohon lengkapi semua mapping POD.")
             else:
                 gen = BapGenerator(v_name, v_voy, v_pol)
                 
-                # Logic: Untuk setiap simbol, kita buatkan record di BAP
-                # (Proses koordinat otomatis akan memerlukan logic grid mapping)
-                for sym, pod_code in mapping_dict.items():
-                    # Contoh dummy Bay 01
-                    gen.add_slot("001", "08", "82", v_pol, pod_code)
+                # Loop simulasi (Defaulting ke satu slot per simbol untuk testing)
+                for sym, pod in mapping.items():
+                    gen.add_slot("001", "08", "82", v_pol, pod)
                 
-                output_bap = gen.finalize()
-                st.success("File MOVINS Berhasil Dibuat!")
-                st.download_button("📥 Download .BAP", output_bap, f"{v_name}_{v_voy}.BAP")
+                res = gen.finalize()
+                st.success("Konversi Berhasil!")
+                st.download_button("Download .BAP", res, f"MOVINS_{v_voy}.BAP")
+                st.code(res, language='text')
