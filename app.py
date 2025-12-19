@@ -1,7 +1,7 @@
 import streamlit as st
 import pdfplumber
 import datetime
-import re
+from collections import Counter
 
 # --- FUNGSI CORE: GENERATOR BAP ---
 class BapGenerator:
@@ -14,7 +14,6 @@ class BapGenerator:
         self.segments.append(f"DTM+137:{now.strftime('%Y%m%d%H%M')}:201'")
         self.segments.append(f"TDT+20+{voyage}+++:172:20+++BKLU:103::{vessel_name}'")
         self.segments.append(f"LOC+5+{pol}:139:6'")
-        self.segments.append("HAN+LOA'")
 
     def add_slot(self, bay, row, tier, pol, pod):
         coord = f"{int(bay):03d}{int(row):02d}{int(tier):02d}"
@@ -31,73 +30,80 @@ class BapGenerator:
         self.segments.append("UNZ+1+0'")
         return '\r\n'.join(self.segments)
 
-# --- FUNGSI PARSING DENGAN WHITELIST KARAKTER ---
-def extract_cargo_codes(uploaded_file, page_index):
-    cargo_symbols = []
+# --- FUNGSI PARSING & SUMMARY ---
+def get_cargo_summary(uploaded_file, page_index):
+    raw_symbols = []
+    # Daftar kata yang pasti bukan simbol kargo
+    trash = ["NO", "X", "POL", "BAY", "VOY", "DATE", "PAGE", "DKT", "STW", "EVER", "BLINK"]
     
     with pdfplumber.open(uploaded_file) as pdf:
         page = pdf.pages[page_index]
         words = page.extract_words()
-        
         for w in words:
-            raw_text = w['text'].strip()
-            
-            # Kriteria Ketat (Whitelist):
-            # 1. Harus Huruf Besar semua
-            # 2. Tidak boleh ada angka
-            # 3. Panjangnya 1-3 karakter (misal: P, PP, PPP)
-            # 4. Bukan kata umum yang sering muncul di header/footer
-            if (raw_text.isupper() and 
-                raw_text.isalpha() and 
-                len(raw_text) <= 3 and
-                raw_text not in ["NO", "X", "POL", "BAY", "VOY", "DKT", "STW", "PAGE"]):
-                
-                # Kita ambil karakter tunggalnya saja (misal PPP jadi P)
-                single_code = raw_text[0]
-                cargo_symbols.append(single_code)
-                
-    return sorted(list(set(cargo_symbols)))
+            txt = w['text'].strip().upper()
+            # Hanya ambil huruf besar tunggal (seperti P, J, U, X)
+            # Karena di PDF Anda simbol kargo biasanya huruf tunggal
+            if len(txt) == 1 and txt.isalpha() and txt not in trash:
+                raw_symbols.append(txt)
+            elif len(txt) > 1 and txt.isalpha() and txt not in trash:
+                # Jika ada teks seperti 'PPP', kita ambil 'P' saja
+                if len(set(txt)) == 1: 
+                    raw_symbols.append(txt[0])
+                    
+    return Counter(raw_symbols)
 
 # --- UI STREAMLIT ---
-st.set_page_config(page_title="Stowage to BAP v3", layout="centered")
-st.title("🚢 BAP Generator (Final Filter)")
+st.set_page_config(page_title="BAP Generator Smart", layout="wide")
+st.title("🚢 PDF to BAP - Lite Version")
 
 with st.sidebar:
-    st.header("Informasi Kapal")
+    st.header("Vessel Info")
     v_name = st.text_input("Vessel Name", "EVER BLINK")
     v_voy = st.text_input("Voyage", "1170-077A")
     v_pol = st.text_input("POL", "IDJKT")
 
-uploaded_file = st.file_uploader("Upload Stowage PDF (Page 1)", type=["pdf"])
+uploaded_file = st.file_uploader("Upload Stowage PDF", type=["pdf"])
 
 if uploaded_file:
-    # Scan simbol
-    detected = extract_cargo_codes(uploaded_file, 0)
+    # 1. Get Summary
+    summary = get_cargo_summary(uploaded_file, 0)
     
-    if not detected:
-        st.warning("Tidak ditemukan kode kargo (seperti P, J, U) di halaman ini.")
+    if not summary:
+        st.warning("Tidak ditemukan kode kargo yang valid di Halaman 1.")
     else:
-        st.subheader("📍 Validasi Tujuan (POD)")
-        st.write("Ditemukan simbol kargo di dalam Bay. Masukkan UNLOCODE tujuannya:")
+        st.subheader("📊 Ringkasan Data Terdeteksi")
+        
+        # Tampilkan Summary dalam kolom
+        sum_cols = st.columns(len(summary))
+        for i, (sym, count) in enumerate(summary.items()):
+            sum_cols[i].metric(label=f"Simbol {sym}", value=f"{count} Box")
+
+        st.divider()
+        st.subheader("📍 Mapping POD (Kosongkan jika tidak ingin diproses)")
         
         mapping = {}
-        # Tampilkan secara horizontal
-        cols = st.columns(len(detected))
-        for i, sym in enumerate(detected):
-            with cols[i]:
-                mapping[sym] = st.text_input(f"Simbol {sym}", placeholder="POD", key=f"v_{sym}").upper()
+        input_cols = st.columns(len(summary))
+        for i, sym in enumerate(summary.keys()):
+            mapping[sym] = input_cols[i].text_input(f"POD untuk {sym}", key=f"in_{sym}").upper()
 
-        if st.button("Generate .BAP"):
-            if any(v == "" for v in mapping.values()):
-                st.error("Mohon lengkapi semua mapping POD.")
+        if st.button("🚀 Generate .BAP File"):
+            # Filter hanya yang diisi POD-nya
+            active_mapping = {k: v for k, v in mapping.items() if v.strip() != ""}
+            
+            if not active_mapping:
+                st.error("Minimal satu POD harus diisi untuk generate file.")
             else:
                 gen = BapGenerator(v_name, v_voy, v_pol)
                 
-                # Loop simulasi (Defaulting ke satu slot per simbol untuk testing)
-                for sym, pod in mapping.items():
-                    gen.add_slot("001", "08", "82", v_pol, pod)
+                # Logic simulasi: memasukkan data berdasarkan jumlah box yang ditemukan
+                # Catatan: Untuk koordinat asli (Bay/Row/Tier) memerlukan deteksi grid x,y
+                for sym, pod in active_mapping.items():
+                    total_box = summary[sym]
+                    for _ in range(total_box):
+                        # Contoh dummy koordinat
+                        gen.add_slot("001", "08", "82", v_pol, pod)
                 
-                res = gen.finalize()
-                st.success("Konversi Berhasil!")
-                st.download_button("Download .BAP", res, f"MOVINS_{v_voy}.BAP")
-                st.code(res, language='text')
+                output = gen.finalize()
+                st.success(f"Berhasil memproses {len(active_mapping)} kode kargo.")
+                st.download_button("📥 Download .BAP", output, f"{v_name}_{v_voy}.BAP")
+                st.text_area("Preview:", output, height=150)
